@@ -10,7 +10,7 @@ from mutagen import File, FileType, MutagenError  # type: ignore[reportPrivateIm
 from mutagen.apev2 import APEv2
 from mutagen.asf import ASFTags
 from mutagen.flac import VCommentDict  # type: ignore[reportPrivateImportUsage]
-from mutagen.id3 import ID3, SYLT, USLT  # type: ignore[reportPrivateImportUsage]
+from mutagen.id3 import ID3, SYLT, TPE1, TPE2, USLT  # type: ignore[reportPrivateImportUsage]
 from mutagen.mp4 import MP4Tags
 from PySide6.QtCore import QMimeData
 
@@ -278,6 +278,36 @@ def read_lyrics(file_path: Path | str) -> str:
         msg = f"读取歌词失败: {e.__class__.__name__}: {e!s}"
         raise GetSongInfoError(msg) from e
 
+def _fill_artist_tags(audio: FileType, matched_artist: str) -> None:
+    """补齐艺术家标签（缺失才填，绝不覆盖已有值）。
+
+    ARTIST 缺失时用匹配到的歌手补；专辑艺术家缺失时优先用文件自带
+    ARTIST、其次用匹配歌手（部分播放器按专辑艺术家署名，缺失会显示
+    「未知艺术家」）。ASF(WMA) 不在覆盖范围内。
+    """
+    tags = audio.tags
+    if isinstance(tags, ID3):
+        tpe1 = tags.get("TPE1")
+        file_artist = str(tpe1.text[0]) if tpe1 and tpe1.text else ""
+        if not file_artist:
+            tags.add(TPE1(encoding=3, text=matched_artist))
+        if not tags.get("TPE2"):
+            tags.add(TPE2(encoding=3, text=file_artist or matched_artist))
+    elif isinstance(tags, VCommentDict):
+        file_artist = (tags.get("ARTIST") or [""])[0]
+        if not file_artist:
+            tags["ARTIST"] = matched_artist
+        if not tags.get("ALBUMARTIST"):
+            tags["ALBUMARTIST"] = file_artist or matched_artist
+    elif isinstance(tags, MP4Tags):
+        file_artist = (tags.get("©ART") or [""])[0]
+        if not file_artist:
+            tags["©ART"] = [matched_artist]
+        if not tags.get("aART"):
+            tags["aART"] = [file_artist or matched_artist]
+
+
+
 def write_lyrics(file_path: Path | str, lyrics_text: str, lyrics: Lyrics | None = None) -> None:
     audio = File(file_path)
 
@@ -315,6 +345,12 @@ def write_lyrics(file_path: Path | str, lyrics_text: str, lyrics: Lyrics | None 
         else:
             msg = f"{file_path} 不支持的文件格式"
             raise FileTypeError(msg)
+
+        # 写歌词时顺带补齐艺术家/专辑艺术家（有匹配结果才补）
+        if lyrics is not None:
+            matched_artist = str(lyrics.info.songinfo.artist or "").strip()
+            if matched_artist:
+                _fill_artist_tags(audio, matched_artist)
 
         # 保存修改
         if isinstance(audio.tags, ID3):

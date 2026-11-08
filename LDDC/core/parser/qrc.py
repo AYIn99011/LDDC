@@ -51,6 +51,27 @@ def qrc2data(s_qrc: str) -> tuple[dict, LyricsData]:
             if tag_split_content:
                 tags.update({tag_split_content[0][0]: tag_split_content[0][1]})
 
+    # QQ 部分 QRC 的行时长自带约 +300ms 尾巴，会越进下一行，按区间高亮的
+    # 播放器会同时点亮两行。返回前把越界行的词起始/词结束/行结束钳进本行
+    # 区间（不越过下一行行首），只影响高亮归属，不动歌词内容与行首时间。
+    for i in range(len(lrc_list) - 1):
+        line = lrc_list[i]
+        next_start = lrc_list[i + 1].start
+        if line.end is None or next_start is None or line.end <= next_start:
+            continue
+        floor = max(line.start or 0, next_start - 1)
+        words = []
+        for w in line.words:
+            w_start = min(w.start, floor) if w.start is not None else w.start
+            w_end = w.end
+            if w_end is not None:
+                w_end = max(w_start if w_start is not None else w_end, min(w_end, next_start))
+            words.append(LyricsWord(w_start, w_end, w.text))
+        new_end = max(line.start or 0, min(line.end, next_start))
+        if words and words[-1].start is not None:
+            new_end = max(new_end, words[-1].start)
+        lrc_list[i] = LyricsLine(line.start, new_end, words)
+
     return tags, lrc_list
 
 

@@ -180,6 +180,10 @@ class QMAPI(CloudAPI):
 
         """
         pagesize = 20
+        if search_type == SearchType.SONG:
+            # QQ 已关闭免登录正式搜索（DoSearchForQQMusicLite 恒返回 2001），
+            # 单曲搜索改走 smartbox 联想 + 详情补全，见 _search_song_smartbox。
+            return self._search_song_smartbox(keyword, page, pagesize)
         param = {
             "search_id": str(random.randint(1, 20) * 18014398509481984 + random.randint(0, 4194304) * 4294967296 + round(time.time() * 1000) % 86400000),
             "remoteplace": "search.android.keyboard",
@@ -319,6 +323,78 @@ class QMAPI(CloudAPI):
 
             case _:
                 raise NotImplementedError
+
+    def _search_song_smartbox(self, keyword: str, page: int, pagesize: int) -> APIResultList[SongInfo]:
+        """smartbox 联想搜索 + get_song_detail_yqq 逐首补全。
+
+        smartbox 只给 id/mid/歌名/歌手字符串，缺时长、专辑、语种，
+        而 get_lyrics 需要 id/时长/专辑，所以逐首补详情，再组装成
+        format_songinfos 期望的 DoSearch 条目结构复用其转换逻辑。
+        单首补详情失败只跳过该条，不拖垮整页结果。
+        注意：smartbox_new 没有分页参数，只有第一页；page > 1 返回空。
+        """
+        start_index = (page - 1) * pagesize
+        search_info = SearchInfo(
+            source=self.source,
+            keyword=keyword,
+            search_type=SearchType.SONG,
+            page=page,
+        )
+        if page > 1:
+            return APIResultList([], search_info, (start_index, start_index - 1, start_index))
+        response = self.client.get(
+            "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg",
+            params={
+                "key": keyword,
+                "format": "json",
+                "inCharset": "utf8",
+                "outCharset": "utf-8",
+                "jsonpCallback": "cb",
+            },
+            headers={"user-agent": "Mozilla/5.0", "referer": "https://y.qq.com/"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        text = response.text
+        payload = json.loads(text[text.index("(") + 1 : text.rindex(")")])
+        itemlist = ((payload.get("data") or {}).get("song") or {}).get("itemlist") or []
+        items = []
+        for item in itemlist:
+            mid = item.get("mid")
+            if not mid:
+                continue
+            try:
+                detail = self.request(
+                    "get_song_detail_yqq",
+                    "music.pf_song_detail_svr",
+                    {"song_type": 0, "song_mid": mid},
+                )
+            except Exception:
+                continue
+            track_info = detail.get("track_info") or {}
+            if not track_info:
+                continue
+            items.append(
+                {
+                    "id": track_info.get("id", item.get("id")),
+                    "mid": track_info.get("mid", mid),
+                    "title": track_info.get("name", item.get("name", "")),
+                    "subtitle": track_info.get("subtitle", ""),
+                    "singer": [{"name": singer.get("name", "")} for singer in track_info.get("singer", [])],
+                    "album": {"name": (track_info.get("album") or {}).get("name", "")},
+                    "interval": track_info.get("interval", 0),
+                    "language": track_info.get("language", 0),
+                }
+            )
+        return APIResultList(
+            self.format_songinfos(items),
+            search_info,
+            (
+                start_index,
+                start_index + len(items) - 1,
+                start_index + len(items),
+            ),
+        )
 
     def get_songlist(self, songlist_info: SongListInfo) -> APIResultList[SongInfo]:
         match songlist_info.type:
